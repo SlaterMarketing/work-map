@@ -2,7 +2,7 @@
 // labels on by default) and the video download. Used by the CLI's HTML file and by the website.
 //
 // mountStudio(container, data, opts) — data is work-map data (see graph.js).
-// opts: { theme, font, displayFont, byline, credit, anonymise (default true), filename,
+// opts: { theme, font, displayFont, byline, credit, anonymise (default true), filename, accent, onAccent,
 //         beforeDownload({ graph, video, format }) → Promise<boolean>   (false cancels, e.g. an email gate)
 //         onDownloaded({ graph, format, type }) }
 
@@ -63,7 +63,7 @@ export function mountStudio(container, data, opts = {}) {
   const font = opts.font || DEFAULT_FONT;
   const root = document.createElement('div');
   root.className = 'wms';
-  const vars = { page: theme.page, surface: theme.surface, text: theme.text, secondary: theme.secondary, muted: theme.muted, accent: theme.series[0], 'on-accent': '#fff', border: themeName === 'light' ? 'rgba(11,11,11,.12)' : 'rgba(255,255,255,.12)', font };
+  const vars = { page: theme.page, surface: theme.surface, text: theme.text, secondary: theme.secondary, muted: theme.muted, accent: opts.accent || theme.series[0], 'on-accent': opts.onAccent || '#fff', border: themeName === 'light' ? 'rgba(11,11,11,.12)' : 'rgba(255,255,255,.12)', font };
   for (const [k, v] of Object.entries(vars)) root.style.setProperty(`--wms-${k}`, v);
   root.innerHTML = `
     <div class="wms-bar">
