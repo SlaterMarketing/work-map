@@ -60,7 +60,8 @@ export function combineSources(sources, opts = {}) {
     links: links.map((l) => ({ ...l, source: alias.get(l.source) || l.source, target: alias.get(l.target) || l.target })),
     series,
     currency,
-    terms: {
+    // A source that brings its own words (a saved map, say) keeps them.
+    terms: sources.find((s) => s.terms)?.terms || {
       // campaign exports are grouped by list or name: "Newsletter", "Search". Those are channels.
       project: onlyCampaigns ? ['channel', 'channels'] : ['project', 'projects'],
       client: sales ? ['company', 'companies'] : ['client', 'clients'],
