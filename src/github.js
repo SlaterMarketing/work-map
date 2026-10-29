@@ -13,7 +13,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export class RateLimited extends Error {}
 
 function client(token, signal) {
-  return async function gh(path, { raw = false, allow404 = false } = {}) {
+  async function gh(path, { raw = false, allow404 = false } = {}) {
     const res = await fetch(path.startsWith('http') ? path : API + path, {
       signal,
       headers: {
@@ -22,14 +22,18 @@ function client(token, signal) {
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
     });
-    if ((res.status === 403 || res.status === 429) && res.headers.get('x-ratelimit-remaining') === '0') {
+    const left = res.headers.get('x-ratelimit-remaining');
+    if (left !== null) gh.remaining = Number(left);
+    if ((res.status === 403 || res.status === 429) && left === '0') {
       throw new RateLimited('GitHub rate limit reached');
     }
     if (allow404 && (res.status === 404 || res.status === 403)) return null;
     if (res.status === 202 || res.status === 204) return { status: res.status };
     if (!res.ok) throw new Error(`GitHub ${res.status} for ${path}`);
     return raw ? res.text() : { status: res.status, body: await res.json(), next: /<([^>]+)>;\s*rel="next"/.exec(res.headers.get('link') || '')?.[1] };
-  };
+  }
+  gh.remaining = Infinity;
+  return gh;
 }
 
 async function all(gh, path, max = 1000) {
@@ -44,30 +48,27 @@ async function all(gh, path, max = 1000) {
 }
 
 // Your commits per month, from GitHub's weekly contributor stats (one request per repo). GitHub
-// answers 202 while it works them out, so this waits and asks again.
-async function commitMonths(gh, repo, login, tries) {
-  for (let i = 0; i < tries; i++) {
-    const r = await gh(`/repos/${repo.full_name}/stats/contributors`, { allow404: true });
-    if (!r) return null;
-    if (r.status === 202) { await sleep(1500 + i * 1000); continue; }
-    if (r.status === 204 || !Array.isArray(r.body)) return {};
-    const me = r.body.find((c) => c.author && c.author.login.toLowerCase() === login.toLowerCase());
-    const months = {};
-    for (const wk of me?.weeks || []) {
-      if (!wk.c) continue;
-      const k = new Date(wk.w * 1000).toISOString().slice(0, 7);
-      months[k] = (months[k] || 0) + wk.c;
-    }
-    return months;
+// answers 202 the first time while it works them out: that's 'pending', to ask again shortly.
+async function statsMonths(gh, repo, login) {
+  const r = await gh(`/repos/${repo.full_name}/stats/contributors`, { allow404: true });
+  if (!r) return null;
+  if (r.status === 202) return 'pending';
+  if (r.status === 204 || !Array.isArray(r.body)) return {};
+  const me = r.body.find((c) => c.author && c.author.login.toLowerCase() === login.toLowerCase());
+  const months = {};
+  for (const wk of me?.weeks || []) {
+    if (!wk.c) continue;
+    const k = new Date(wk.w * 1000).toISOString().slice(0, 7);
+    months[k] = (months[k] || 0) + wk.c;
   }
-  return null;
+  return months;
 }
 
-// When the stats aren't ready, the commit list (up to 300 of your commits per repo).
-async function commitMonthsFromList(gh, repo, login) {
+// When the stats still aren't ready, the commit list (up to 100 of your commits per page).
+async function commitMonthsFromList(gh, repo, login, pages) {
   const months = {};
   let url = `/repos/${repo.full_name}/commits?author=${encodeURIComponent(login)}&per_page=100`;
-  for (let page = 0; url && page < 3; page++) {
+  for (let page = 0; url && page < pages; page++) {
     const r = await gh(url, { allow404: true });
     if (!r || !Array.isArray(r.body)) break;
     for (const c of r.body) {
@@ -119,46 +120,73 @@ export async function collectGitHub(opts = {}) {
     .sort((a, b) => (b.pushed_at || '').localeCompare(a.pushed_at || ''))
     .slice(0, opts.maxRepos || (signedIn ? 150 : 20));
 
-  const items = [];
-  const texts = new Map();
   let limited = false;
-  let done = 0;
-  progress({ done, total: repos.length, message: `Reading ${repos.length} repos…` });
-  await pool(repos, signedIn ? 6 : 3, async (repo) => {
+  const guard = async (fn) => {
     if (limited) return;
-    try {
-      let months = await commitMonths(gh, repo, login, signedIn ? 5 : 2);
-      if (months === null && signedIn) months = await commitMonthsFromList(gh, repo, login);
-      if (!months || !Object.keys(months).length) return;
-      const item = {
-        id: 'gh:' + repo.full_name,
-        label: repo.name,
-        kind: 'project',
-        owner: repo.owner.login,
-        public: !repo.private,
-        url: repo.html_url,
-        description: repo.description || '',
-        language: repo.language || null,
-        tags: [...(repo.topics || [])],
-        series: { commits: months },
-      };
-      if (signedIn) {
-        const [readme, pkg] = await Promise.all([
-          gh(`/repos/${repo.full_name}/readme`, { raw: true, allow404: true }),
-          gh(`/repos/${repo.full_name}/contents/package.json`, { raw: true, allow404: true }),
-        ]);
-        if (typeof pkg === 'string') item.tags.push(...depsFrom(pkg));
-        const text = [typeof readme === 'string' ? readme.slice(0, 60000) : '', typeof pkg === 'string' ? pkg : ''].join('\n');
-        if (text.trim()) texts.set(item.id, text);
-      }
-      items.push(item);
-    } catch (err) {
+    try { await fn(); } catch (err) {
       if (err instanceof RateLimited) limited = true;
       else if (err.name === 'AbortError') throw err;
-    } finally {
-      progress({ done: ++done, total: repos.length, repo: repo.name });
     }
-  });
+  };
+
+  // Commits: ask for every repo's stats, then ask again for the ones GitHub was still working out,
+  // waiting a little longer each round. Whatever is still pending falls back to the commit list,
+  // as far as the rate limit allows.
+  progress({ done: 0, total: repos.length, message: `Reading ${repos.length} repos…` });
+  const months = new Map();
+  let pending = repos;
+  const rounds = signedIn ? 5 : 3;
+  for (let round = 0; round < rounds && pending.length && !limited; round++) {
+    if (round) await sleep(1500 + round * 1000);
+    const still = [];
+    await pool(pending, 6, (repo) => guard(async () => {
+      const m = await statsMonths(gh, repo, login);
+      if (m === 'pending') still.push(repo); else if (m) months.set(repo, m);
+    }));
+    pending = still;
+    progress({ done: repos.length - pending.length, total: repos.length });
+  }
+  await pool(pending, 4, (repo) => guard(async () => {
+    if (gh.remaining < 4) return;
+    months.set(repo, await commitMonthsFromList(gh, repo, login, signedIn ? 3 : 1));
+  }));
+
+  const items = [];
+  const texts = new Map();
+  const mine = repos.filter((r) => months.get(r) && Object.keys(months.get(r)).length);
+  let done = 0;
+  if (signedIn) progress({ done, total: mine.length, message: 'Reading READMEs for links…' });
+  await pool(mine, 6, (repo) => guard(async () => {
+    const item = {
+      id: 'gh:' + repo.full_name,
+      label: repo.name,
+      kind: 'project',
+      owner: repo.owner.login,
+      public: !repo.private,
+      url: repo.html_url,
+      description: repo.description || '',
+      language: repo.language || null,
+      tags: [...(repo.topics || [])],
+      series: { commits: months.get(repo) },
+    };
+    if (signedIn) {
+      const [readme, pkg] = await Promise.all([
+        gh(`/repos/${repo.full_name}/readme`, { raw: true, allow404: true }),
+        gh(`/repos/${repo.full_name}/contents/package.json`, { raw: true, allow404: true }),
+      ]);
+      if (typeof pkg === 'string') item.tags.push(...depsFrom(pkg));
+      const text = [typeof readme === 'string' ? readme.slice(0, 60000) : '', typeof pkg === 'string' ? pkg : ''].join('\n');
+      if (text.trim()) texts.set(item.id, text);
+    }
+    items.push(item);
+    if (signedIn) progress({ done: ++done, total: mine.length, repo: repo.name });
+  }));
+  // A repo whose README couldn't be read still belongs on the map.
+  for (const repo of mine) {
+    if (items.some((i) => i.id === 'gh:' + repo.full_name)) continue;
+    items.push({ id: 'gh:' + repo.full_name, label: repo.name, kind: 'project', owner: repo.owner.login, public: !repo.private, url: repo.html_url,
+      description: repo.description || '', language: repo.language || null, tags: [...(repo.topics || [])], series: { commits: months.get(repo) } });
+  }
 
   items.sort((a, b) => a.id.localeCompare(b.id));
   return {
