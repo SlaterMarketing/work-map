@@ -1,0 +1,55 @@
+{
+  "name": "work-map",
+  "version": "0.1.0",
+  "description": "Map your work: projects, clients and how they connect, as an interactive map and a timeline video. From GitHub, your local git repos and your calendar. Runs in the browser.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./dist/work-map.js": "./dist/work-map.js"
+  },
+  "bin": {
+    "work-map": "cli/work-map.js"
+  },
+  "files": [
+    "src",
+    "cli",
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "sample": "node scripts/sample.mjs",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "github",
+    "visualisation",
+    "portfolio",
+    "timeline",
+    "video",
+    "network-map",
+    "webcodecs"
+  ],
+  "author": "Slater Marketing (https://slatermarketing.co.uk)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SlaterMarketing/work-map.git"
+  },
+  "homepage": "https://slatermarketing.co.uk/work-map",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "d3-force": "^3.0.0",
+    "d3-polygon": "^3.0.1",
+    "d3-shape": "^3.2.0",
+    "mediabunny": "^1.63.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "playwright-core": "1.64"
+  }
+}
