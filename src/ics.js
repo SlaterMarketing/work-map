@@ -85,7 +85,8 @@ export function clientsFromCalendar(texts, opts = {}) {
   const seen = new Set();
   const unique = events.filter((e) => { const key = e.date.toISOString() + e.domains.join(); if (seen.has(key)) return false; seen.add(key); return true; });
 
-  let own = new Set(opts.ownDomains || []);
+  // Domains given as yours only count if they're in this calendar; otherwise it works them out.
+  let own = new Set((opts.ownDomains || []).filter((d) => unique.some((e) => e.domains.includes(d))));
   if (!own.size) {
     const counts = new Map();
     for (const e of unique) for (const d of e.domains) counts.set(d, (counts.get(d) || 0) + 1);

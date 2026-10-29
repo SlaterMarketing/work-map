@@ -1,5 +1,5 @@
 // Opens examples/demo.html in Chrome and saves screenshots of the map and of video frames, then
-// exports the whole video. Usage: node scripts/check.mjs <out-dir> [format]
+// exports the whole video. Usage: node scripts/check.mjs <out-dir> [format] [demo file in examples/]
 import { chromium } from 'playwright-core';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -7,12 +7,13 @@ import { pathToFileURL } from 'node:url';
 
 const out = process.argv[2] || '.';
 const format = process.argv[3] || 'vertical';
+const demo = process.argv[4] || 'sample-demo.html';
 const browser = await chromium.launch({ executablePath: process.env.CHROME || 'C:/Program Files/Google/Chrome/Application/chrome.exe' });
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
 page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
-await page.goto(pathToFileURL(new URL('../examples/demo.html', import.meta.url).pathname.slice(1)).href);
+await page.goto(pathToFileURL(new URL('../examples/' + demo, import.meta.url).pathname.slice(1)).href);
 await page.waitForTimeout(800);
 await page.screenshot({ path: join(out, 'map.png') });
 
@@ -30,6 +31,6 @@ const shots = await page.evaluate(async (format) => {
   res.export = { type: ex.type, bytes: ex.blob.size, seconds: (performance.now() - t0) / 1000 };
   return res;
 }, format);
-shots.pngs.forEach((d, i) => writeFileSync(join(out, `frame-${format}-${i}.png`), Buffer.from(d.split(',')[1], 'base64')));
+shots.pngs.forEach((d, i) => writeFileSync(join(out, `frame-${demo.replace('.html', '')}-${format}-${i}.png`), Buffer.from(d.split(',')[1], 'base64')));
 console.log(JSON.stringify({ duration: shots.duration, frames: shots.frames, export: shots.export, errors }, null, 1));
 await browser.close();

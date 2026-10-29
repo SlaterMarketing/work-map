@@ -3,6 +3,7 @@
 // any frame can be drawn in any order, and an export is identical every time.
 
 import { DEFAULT_FONT, THEMES, clamp, cumAt, drawScene, familyColor, rgba } from './scene.js';
+import { SERIES, STAT_ORDER, formatMoney, seriesLabel } from './series.js';
 
 export const FORMATS = {
   vertical: { width: 1080, height: 1920 },
@@ -41,15 +42,26 @@ const LAYOUTS = {
   },
 };
 
-const STAT_NAMES = [
-  ['projects', 'projects'], ['clients', 'clients'], ['commits', 'commits'],
-  ['meetings', 'meetings'], ['emails', 'emails sent'],
-];
+/** The video's counters: projects and companies, then whichever kinds of activity the data has. */
+export function statsFor(g, max = 6) {
+  const t = g.totals;
+  const names = [...STAT_ORDER, ...Object.keys(t).filter((k) => !STAT_ORDER.includes(k) && k !== 'projects' && k !== 'clients')];
+  return [
+    ['projects', g.terms.project[1]],
+    ['clients', g.terms.client[1]],
+    ...names.map((k) => [k, seriesLabel(k)]),
+  ]
+    .filter(([k]) => (t[k] || 0) > 0)
+    // "campaigns" as a count of groups and as a count of sends would say the same word twice
+    .filter(([k, label], i, all) => !(k === 'projects' && all.some(([k2, l2]) => k2 !== 'projects' && l2 === label)))
+    .slice(0, max);
+}
 
 const easeOutBack = (x) => 1 + 2.70158 * Math.pow(x - 1, 3) + 1.70158 * Math.pow(x - 1, 2);
 const easeInOut = (x) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
 const fmt = (n) => Math.round(n).toLocaleString('en-GB');
-const short = (n) => (n >= 1e5 ? Math.round(n / 1e3) + 'k' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : fmt(n));
+const short = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e5 ? Math.round(n / 1e3) + 'k' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : fmt(n));
+const plural = (n, [one, many]) => `${fmt(n)} ${n === 1 ? one : many}`;
 const monthName = (k, style = 'short') => new Date(k + '-15T12:00:00Z').toLocaleDateString('en-GB', { month: style, year: 'numeric', timeZone: 'UTC' });
 
 function wrap(ctx, text, width) {
@@ -76,13 +88,17 @@ export function autoMilestones(g) {
     const p = born.filter((n) => n.kind === 'project').length, c = born.length - p;
     const active = g.nodes.filter((n) => Object.keys(n.activity).some((m) => m.startsWith(year))).length;
     const sub = born.length
-      ? [p && `${p} new project${p === 1 ? '' : 's'}`, c && `${c} new client${c === 1 ? '' : 's'}`].filter(Boolean).join(', ')
-      : `${active} project${active === 1 ? '' : 's'} and clients on the go`;
+      ? [p && `${p} new ${p === 1 ? g.terms.project[0] : g.terms.project[1]}`, c && `${c} new ${c === 1 ? g.terms.client[0] : g.terms.client[1]}`].filter(Boolean).join(', ')
+      : `${active} active this year`;
     if (born.length || active) out.push([k, year, sub]);
   }
-  const perMonth = g.months.map((_, i) => g.nodes.reduce((a, n) => a + (n.series.commits ? n.series.commits[i] - (i ? n.series.commits[i - 1] : 0) : 0), 0));
-  const best = perMonth.indexOf(Math.max(...perMonth));
-  if (perMonth[best] > 0 && !out.some(([k]) => k === g.months[best])) out.push([g.months[best], 'Busiest month', `${fmt(perMonth[best])} commits`]);
+  // the busiest month, in the most telling count the data has: deals won before meetings before commits
+  const key = STAT_ORDER.find((k) => !SERIES[k]?.money && g.totals[k] > 0 && g.nodes.some((n) => n.series[k]));
+  if (key) {
+    const perMonth = g.months.map((_, i) => g.nodes.reduce((a, n) => a + (n.series[key] ? n.series[key][i] - (i ? n.series[key][i - 1] : 0) : 0), 0));
+    const best = perMonth.indexOf(Math.max(...perMonth));
+    if (perMonth[best] > 0 && !out.some(([k]) => k === g.months[best])) out.push([g.months[best], 'Busiest month', `${fmt(perMonth[best])} ${seriesLabel(key, perMonth[best])}`]);
+  }
   return out.sort((a, b) => (a[0] < b[0] ? -1 : 1));
 }
 
@@ -117,14 +133,16 @@ export function createVideo(g, opts = {}) {
   const years = Math.floor(span / 12);
   const title = opts.title || (years >= 2 ? `${years} years of work, mapped` : `${span} months of work, mapped`);
   const t = g.totals;
-  const subtitle = opts.subtitle || [`${t.projects} project${t.projects === 1 ? '' : 's'}`, t.clients ? `${t.clients} client${t.clients === 1 ? '' : 's'}` : null]
+  const subtitle = opts.subtitle || [t.projects ? plural(t.projects, g.terms.project) : null, t.clients ? plural(t.clients, g.terms.client) : null]
     .filter(Boolean).join(' · ') + ` since ${monthName(months[0], 'long')}`;
   const byline = opts.byline ?? g.name;
   const milestones = (opts.milestones || autoMilestones(g)).filter(([k]) => months.includes(k));
-  const stats = STAT_NAMES.filter(([k]) => (t[k] || 0) > 0).slice(0, Lay.stats.cols * 2);
+  const stats = statsFor(g, Lay.stats.cols * 2);
+  const show = (key, v) => (SERIES[key]?.money ? formatMoney(v, g.currency) : short(v));
   const statValue = (key, f, vis) => {
     if (key === 'projects') return vis.filter((i) => g.nodes[i].kind === 'project').length;
     if (key === 'clients') return vis.filter((i) => g.nodes[i].kind === 'client').length;
+    if (g.extra[key]) return cumAt(g.extra[key], f);
     return g.nodes.reduce((a, n) => a + (n.series[key] ? cumAt(n.series[key], f) : 0), 0);
   };
 
@@ -225,7 +243,7 @@ export function createVideo(g, opts = {}) {
       const colW = S.w / S.cols;
       stats.forEach(([key, name], q) => {
         const x = S.x + (q % S.cols) * colW, y = S.y + Math.floor(q / S.cols) * S.row;
-        text(ctx, short(statValue(key, ff, visIdx)), x, y + S.size, S.size, { weight: 750, family: display, spacing: -S.size * 0.02 });
+        text(ctx, show(key, statValue(key, ff, visIdx)), x, y + S.size, S.size, { weight: 750, family: display, spacing: -S.size * 0.02 });
         text(ctx, name, x, y + S.size + S.key * 1.25, S.key, { weight: 400, color: theme.muted });
       });
 
@@ -279,7 +297,7 @@ export function createVideo(g, opts = {}) {
         const a = clamp((tt - MAIN_END - HOLD - 0.4 - q * 0.18) / 0.5);
         ctx.globalAlpha = a;
         const x = x0 + (q % O.cols) * colW, yy = y + Math.floor(q / O.cols) * rowH + (1 - a) * 20;
-        text(ctx, short(key === 'projects' || key === 'clients' ? t[key] : t[key] || 0), x, yy + O.value, O.value, { weight: 800, family: display, spacing: -O.value * 0.03 });
+        text(ctx, show(key, t[key] || 0), x, yy + O.value, O.value, { weight: 800, family: display, spacing: -O.value * 0.03 });
         text(ctx, name, x, yy + O.value + O.key * 1.3, O.key, { weight: 400, color: theme.secondary });
       });
       ctx.globalAlpha = oa;

@@ -1,5 +1,5 @@
 node_modules/
-examples/demo.html
+examples/*-demo.html
 work-map.html
 work-map.json
 *.mp4

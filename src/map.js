@@ -3,6 +3,7 @@
 
 import { neighbours } from './graph.js';
 import { DEFAULT_FONT, THEMES, clamp, cumAt, drawScene, familyColor } from './scene.js';
+import { SERIES, STAT_ORDER, formatMoney, seriesLabel } from './series.js';
 
 const CSS = `
 .wm-root{position:relative;width:100%;height:100%;overflow:hidden;font:13px/1.45 var(--wm-font);color:var(--wm-text);background:var(--wm-page);touch-action:none}
@@ -24,6 +25,7 @@ const CSS = `
 const fmt = (n) => Math.round(n).toLocaleString('en-GB');
 const monthName = (k) => new Date(k + '-15T12:00:00Z').toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' });
 const plural = (n, w) => `${fmt(n)} ${w}${n === 1 ? '' : 's'}`;
+const terms = (n, [one, many]) => `${fmt(n)} ${n === 1 ? one : many}`;
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
 let styled = false;
@@ -119,9 +121,10 @@ export function mountMap(container, graph, opts = {}) {
     const vis = g.nodes.filter(shown);
     const active = g.nodes.filter((n) => n.activity[g.months[k]] > 0).length;
     const p = vis.filter((n) => n.kind === 'project').length, c = vis.length - p;
+    const counts = [p && terms(p, g.terms.project), c && terms(c, g.terms.client)].filter(Boolean).join(' · ');
     when.innerHTML = now()
-      ? `<b>${monthName(g.months[k])}</b><span>${plural(p, 'project')}${c ? ` · ${plural(c, 'client')}` : ''} · ${active} active</span>`
-      : `<b>All time</b><span>${plural(p, 'project')}${c ? ` · ${plural(c, 'client')}` : ''}</span>`;
+      ? `<b>${monthName(g.months[k])}</b><span>${counts} · ${active} active</span>`
+      : `<b>All time</b><span>${counts}</span>`;
     if (pulsing) redraw();
   }
   const redraw = () => { if (!raf) raf = requestAnimationFrame(draw); };
@@ -140,12 +143,13 @@ export function mountMap(container, graph, opts = {}) {
     if (i < 0) { tip.style.display = 'none'; return; }
     const n = g.nodes[i];
     const last = g.months.length - 1;
-    const bits = [];
-    if (n.series.commits) bits.push(plural(n.series.commits[last], 'commit'));
-    if (n.series.meetings) bits.push(plural(n.series.meetings[last], 'meeting'));
-    if (n.series.emails) bits.push(plural(n.series.emails[last], 'email'));
+    const keys = Object.keys(n.series).sort((a, b) => (STAT_ORDER.indexOf(a) + 99) % 99 - (STAT_ORDER.indexOf(b) + 99) % 99);
+    const bits = keys.filter((k) => n.series[k][last] > 0).slice(0, 4).map((k) => {
+      const v = n.series[k][last];
+      return SERIES[k]?.money ? `${formatMoney(v, g.currency)} ${seriesLabel(k)}` : `${fmt(v)} ${seriesLabel(k, v)}`;
+    });
     const links = g.links.filter((l) => l.s === i || l.t === i).length;
-    tip.innerHTML = `<b>${esc(n.label)}</b><span>${n.kind === 'client' ? 'Client · ' : ''}${esc(g.familyLabels[n.family] || n.family)}</span>
+    tip.innerHTML = `<b>${esc(n.label)}</b><span>${n.kind === 'client' ? g.terms.client[0].replace(/^./, (c) => c.toUpperCase()) + ' · ' : ''}${esc(g.familyLabels[n.family] || n.family)}</span>
       <span>${bits.join(' · ')}</span><span>since ${monthName(g.months[n.first])} · ${plural(links, 'connection')}</span>`;
     tip.style.display = 'block';
     const r = tip.getBoundingClientRect();

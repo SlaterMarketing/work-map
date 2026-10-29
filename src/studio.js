@@ -147,7 +147,7 @@ export function mountStudio(container, data, opts = {}) {
       ${fams.map((f) => `<div class="wms-row"><span class="wms-dot" style="background:${colorOf(f)}"></span>
         <input type="text" data-fam="${esc(f)}" value="${esc(graph.familyLabels[f])}" aria-label="Label for ${esc(f)}"><span></span>
         ${graph.familyLabels[f] !== f ? `<small>${esc(f)}</small>` : ''}</div>`).join('')}
-      <h3>Projects and clients</h3>
+      <h3>${esc(graph.terms.project[1])} and ${esc(graph.terms.client[1])}</h3>
       ${rows.map((n) => {
         const off = hidden.has(n.id);
         const realLabel = real.get(n.id) ?? n.label;

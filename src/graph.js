@@ -10,20 +10,23 @@
 //       id: "gh:ada/engine",                // unique
 //       label: "engine",
 //       kind: "project" | "client",
-//       series: { commits: { "2024-03": 12, ... }, meetings: {...}, emails: {...} },
+//       series: { commits: { "2024-03": 12, ... }, meetings: {...}, deals: {...}, ... },   (see series.js)
 //       group?: "Engine",                   // family; worked out from the links when missing
 //       owner?, language?, tags?: [...], public?: true, url?, description?, domain?
 //     }],
-//     links?: [{ source: id, target: id, kind: "client" | "name" | "mention" | "stack", weight: 0..1 }]
+//     links?: [{ source: id, target: id, kind: "client" | "name" | "mention" | "stack", weight: 0..1 }],
+//     series?: { connections: {...} },      // counts that belong to no one node, for the video's counters
+//     currency?: "£",                      // for revenue and spend
+//     terms?: { project: ["campaign", "campaigns"], client: ["company", "companies"] }
 //   }
 // Links of kind "name", "client" and "stack" are also inferred from the items unless
 // opts.inferLinks is false.
 
 import { forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY } from 'd3-force';
+import { seriesWeight } from './series.js';
 
-// How much one unit of each series counts towards a node's size: a meeting is more work than a commit.
-export const SERIES_WEIGHT = { commits: 1, meetings: 4, emails: 1 };
 export const MAX_FAMILIES = 7;
+export const DEFAULT_TERMS = { project: ['project', 'projects'], client: ['client', 'clients'] };
 
 export const monthOf = (date) => String(date).slice(0, 7);
 
@@ -56,7 +59,7 @@ const titleCase = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 export function activityOf(item) {
   const out = {};
   for (const [name, months] of Object.entries(item.series || {})) {
-    const w = SERIES_WEIGHT[name] ?? 1;
+    const w = seriesWeight(name);
     for (const [k, v] of Object.entries(months || {})) if (v > 0) out[k] = (out[k] || 0) + v * w;
   }
   return out;
@@ -128,7 +131,7 @@ export function mentionLinks(items, texts) {
   return links;
 }
 
-function familiesOf(items, links) {
+function familiesOf(items, links, terms) {
   // Families: groups of items joined by a shared name or by client work, named after their best-known
   // member. Whatever is left is grouped by owner (an organisation) or language, then the smallest
   // families are merged into "Other" so each one keeps a distinct colour.
@@ -145,6 +148,14 @@ function familiesOf(items, links) {
   }
   const fam = new Map(items.filter((i) => i.group).map((i) => [i.id, i.group]));
   const owners = new Set(items.map((i) => i.owner).filter(Boolean));
+  // Lots of unconnected companies (a sales pipeline, say) are grouped by the year they first
+  // appear, so the map shows each year's intake; a few just sit together.
+  // Companies you only know through LinkedIn are your network, not clients.
+  const networkOnly = (i) => Object.keys(i.series || {}).every((k) => k === 'connections');
+  const loose = [...comps.values()].filter((m) => m.length === 1 && m[0].kind === 'client' && !networkOnly(m[0])).map((m) => m[0]);
+  const firstYear = (i) => Object.keys(i.activity).sort()[0]?.slice(0, 4) || '';
+  const byYear = loose.length > 8 && new Set(loose.map(firstYear)).size > 1;
+  const Clients = terms.client[1].charAt(0).toUpperCase() + terms.client[1].slice(1);
   for (const members of comps.values()) {
     if (members.length >= 2) {
       const client = members.find((m) => m.kind === 'client');
@@ -154,7 +165,7 @@ function familiesOf(items, links) {
       for (const m of members) fam.set(m.id, name);
     } else {
       const m = members[0];
-      fam.set(m.id, m.kind === 'client' ? 'Clients' : owners.size > 1 && m.owner ? m.owner : m.language ? `${m.language} projects` : 'Projects');
+      fam.set(m.id, m.kind === 'client' ? networkOnly(m) ? 'Network' : (byYear ? `${Clients} from ${firstYear(m)}` : Clients) : owners.size > 1 && m.owner ? m.owner : m.language ? `${m.language} projects` : 'Projects');
     }
   }
   return fam;
@@ -182,7 +193,8 @@ export function buildGraph(data, opts = {}) {
     if (!pairs.has(key) || pairs.get(key).weight < l.weight) pairs.set(key, l);
   }
 
-  const fam = familiesOf(items, [...pairs.values()]);
+  const terms = { ...DEFAULT_TERMS, ...(data.terms || {}) };
+  const fam = familiesOf(items, [...pairs.values()], terms);
   const famTotals = new Map();
   for (const i of items) famTotals.set(fam.get(i.id), (famTotals.get(fam.get(i.id)) || 0) + sum(i.activity));
   let families = [...famTotals.keys()].sort((a, b) => famTotals.get(b) - famTotals.get(a));
@@ -192,7 +204,7 @@ export function buildGraph(data, opts = {}) {
     families = [...keep, 'Other'];
   }
 
-  const allKeys = items.flatMap((i) => Object.keys(i.activity)).sort();
+  const allKeys = [...items.flatMap((i) => Object.keys(i.activity)), ...Object.values(data.series || {}).flatMap((m) => Object.keys(m))].sort();
   const last = monthOf(data.generated || new Date().toISOString());
   const first = opts.start || data.start || allKeys[0] || last;
   const months = monthRange(first < last ? first : last, last);
@@ -221,6 +233,7 @@ export function buildGraph(data, opts = {}) {
       total: cum[cum.length - 1],
       series: Object.fromEntries(Object.keys(i.series || {}).map((k) => [k, cumulative(i.series[k])])),
       public: Boolean(i.public),
+      grouped: Boolean(i.group),
       language: i.language || null,
       url: i.url || null,
       description: i.description || '',
@@ -235,12 +248,16 @@ export function buildGraph(data, opts = {}) {
   layout(nodes, links, families);
 
   const familyLabels = Object.fromEntries(families.map((f) => [f, labels['family:' + f] ?? f]));
-  const seriesNames = [...new Set(items.flatMap((i) => Object.keys(i.series || {})))];
-  const totals = Object.fromEntries(seriesNames.map((s) => [s, nodes.reduce((a, n) => a + (n.series[s]?.[months.length - 1] || 0), 0)]));
+  // Counts that belong to no node (all your LinkedIn connections, say), month by month.
+  const extra = Object.fromEntries(Object.entries(data.series || {}).map(([k, v]) => [k, cumulative(v)]));
+  const seriesNames = [...new Set([...items.flatMap((i) => Object.keys(i.series || {})), ...Object.keys(extra)])];
+  const totals = Object.fromEntries(seriesNames.map((s) => [s, extra[s]
+    ? extra[s][months.length - 1]
+    : nodes.reduce((a, n) => a + (n.series[s]?.[months.length - 1] || 0), 0)]));
   totals.projects = nodes.filter((n) => n.kind === 'project').length;
   totals.clients = nodes.filter((n) => n.kind === 'client').length;
 
-  return { name: data.name || '', generated: last, months, nodes, links, families, familyLabels, totals, radius, maxTotal };
+  return { name: data.name || '', generated: last, months, nodes, links, families, familyLabels, totals, extra, terms, currency: data.currency || '', radius, maxTotal };
 }
 
 // The biggest family sits in the middle and the rest ring around it, so the map grows outward.

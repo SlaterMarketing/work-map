@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// work-map: map your work from the git repos on this computer, with no sign-in and nothing uploaded.
+// work-map: map your work from the git repos on this computer, and from exports of your calendar,
+// CRM, LinkedIn and campaigns, with no sign-in and nothing uploaded.
 //
 //   npx github:SlaterMarketing/work-map ~/code ~/clients --ics calendar.zip
+//   npx github:SlaterMarketing/work-map --csv deals.csv --csv Connections.csv --ics calendar.zip
 //
 // Finds every git repo under the folders you give (the current folder by default), counts your
 // commits by month, reads READMEs and manifests for the links, and writes work-map.html: the map,
@@ -11,18 +13,24 @@ import { execFile } from 'node:child_process';
 import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { combineSources } from '../src/combine.js';
 import { mentionLinks } from '../src/graph.js';
 import { clientsFromCalendar, icsFromZip } from '../src/ics.js';
+import { importTable } from '../src/tables.js';
 import { viewerHtml } from './html.js';
 
 const run = promisify(execFile);
 
-const HELP = `work-map: map your work from the git repos on this computer.
+const HELP = `work-map: map your work from the git repos on this computer, and from exports.
 
 Usage: work-map [folders...] [options]
 
   --author <email>   your commit email; repeat for more (default: git config user.email)
   --ics <file>       calendar export (.ics, or Google Calendar's .zip) to add clients; repeatable
+  --csv <file>       a CSV export to add; repeatable. Recognised: CRM deals (HubSpot, Pipedrive,
+                     Salesforce…), LinkedIn Connections.csv, campaigns (Mailchimp…), ads reports
+                     (Google, Meta…), the Gmail script's sheet, or any sheet with a date and a
+                     client, company, project or campaign column
   --name <name>      the name on the video (default: git config user.name)
   --out <file>       where to write the map (default: work-map.html)
   --json <file>      also write the data as JSON
@@ -34,12 +42,13 @@ Usage: work-map [folders...] [options]
 Everything runs on this computer. Nothing is uploaded.`;
 
 function parseArgs(argv) {
-  const o = { folders: [], authors: [], ics: [], depth: 3, out: 'work-map.html' };
+  const o = { folders: [], authors: [], ics: [], csv: [], depth: 3, out: 'work-map.html' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i], next = () => argv[++i];
     if (a === '-h' || a === '--help') o.help = true;
     else if (a === '--author') o.authors.push(next().toLowerCase());
     else if (a === '--ics') o.ics.push(next());
+    else if (a === '--csv') o.csv.push(next());
     else if (a === '--name') o.name = next();
     else if (a === '--out') o.out = next();
     else if (a === '--json') o.json = next();
@@ -49,7 +58,8 @@ function parseArgs(argv) {
     else if (a.startsWith('-')) throw new Error(`Unknown option ${a}. Try --help.`);
     else o.folders.push(a);
   }
-  if (!o.folders.length) o.folders.push('.');
+  // With only exports given, there are no repos to look for.
+  if (!o.folders.length && !o.ics.length && !o.csv.length) o.folders.push('.');
   return o;
 }
 
@@ -98,11 +108,11 @@ async function main() {
     const email = (await git('.', 'config', '--global', 'user.email')).trim().toLowerCase();
     if (email) o.authors.push(email);
   }
-  if (!o.authors.length) throw new Error('Tell me your commit email with --author you@example.com');
+  if (o.folders.length && !o.authors.length) throw new Error('Tell me your commit email with --author you@example.com');
   const name = o.name || (await git('.', 'config', '--global', 'user.name')).trim();
 
   const repos = [...new Set(o.folders.flatMap((f) => findRepos(resolve(f), o.depth)))];
-  console.log(`Found ${repos.length} git repo${repos.length === 1 ? '' : 's'}. Reading history for ${o.authors.join(', ')}…`);
+  if (o.folders.length) console.log(`Found ${repos.length} git repo${repos.length === 1 ? '' : 's'}. Reading history for ${o.authors.join(', ')}…`);
 
   const scanned = [];
   for (const repo of repos) {
@@ -143,7 +153,20 @@ async function main() {
     if (text.trim()) texts.set(id, text);
     process.stdout.write('.');
   }
-  process.stdout.write('\n');
+  if (o.folders.length) process.stdout.write('\n');
+  // Local paths stay out of the file: ids only need to be unique.
+  const ids = new Map(items.map((it, i) => [it.id, `repo-${i}`]));
+  const sources = [{
+    type: 'local',
+    items: items.map((it) => ({ ...it, id: ids.get(it.id) })),
+    links: mentionLinks(items, texts).map((l) => ({ ...l, source: ids.get(l.source), target: ids.get(l.target) })),
+  }];
+
+  for (const f of o.csv) {
+    const r = importTable(readFileSync(f, 'utf8'), basename(f));
+    console.log(`${basename(f)}: ${r.summary}.`);
+    sources.push(r);
+  }
 
   if (o.ics.length) {
     const calendars = [];
@@ -154,25 +177,20 @@ async function main() {
     const own = o.authors.map((a) => a.split('@')[1]).filter((d) => d && !/gmail|outlook|hotmail|icloud|users\.noreply/.test(d));
     const cal = clientsFromCalendar(calendars, { ownDomains: own.length ? own : undefined });
     console.log(`Calendar: ${cal.events} meetings, ${cal.items.length} clients (your domain: ${cal.ownDomains.join(', ') || 'unknown'}).`);
-    items.push(...cal.items);
+    sources.push({ type: 'calendar', items: cal.items });
   }
-  if (!items.length) throw new Error(`No commits by ${o.authors.join(', ')} in those folders. Check the email with --author.`);
+  if (!sources.some((src) => src.items.length)) {
+    throw new Error(o.folders.length ? `No commits by ${o.authors.join(', ')} in those folders. Check the email with --author.` : 'Nothing to map in those files.');
+  }
 
-  // Local paths stay out of the file: ids only need to be unique.
-  const ids = new Map(items.map((it, i) => [it.id, it.id.startsWith('local:') ? `repo-${i}` : it.id]));
-  const data = {
-    version: 1,
-    name,
-    generated: new Date().toISOString().slice(0, 10),
-    items: items.map((it) => ({ ...it, id: ids.get(it.id) })),
-    links: mentionLinks(items, texts).map((l) => ({ ...l, source: ids.get(l.source), target: ids.get(l.target) })),
-  };
+  const data = combineSources(sources.filter((src) => src.items.length || src.series), { name });
   if (o.since) data.start = o.since;
 
   if (o.json) writeFileSync(o.json, JSON.stringify(data, null, 1));
   writeFileSync(o.out, viewerHtml(data, { anonymise: !o.realNames }));
   const projects = data.items.filter((i) => i.kind === 'project').length;
-  console.log(`Wrote ${o.out}: ${projects} projects, ${data.items.length - projects} clients, ${seen.size} commits. Open it in Chrome, Edge or Safari.`);
+  const count = (n, [one, many]) => `${n} ${n === 1 ? one : many}`;
+  console.log(`Wrote ${o.out}: ${count(projects, data.terms.project)}, ${count(data.items.length - projects, data.terms.client)}${seen.size ? `, ${seen.size} commits` : ''}. Open it in Chrome, Edge or Safari.`);
 }
 
 main().catch((err) => { console.error(err.message || err); process.exit(1); });

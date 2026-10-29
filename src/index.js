@@ -6,4 +6,8 @@ export { mountMap } from './map.js';
 export { collectGitHub, RateLimited } from './github.js';
 export { clientsFromCalendar, parseEvents, icsFromZip, nameFromDomain } from './ics.js';
 export { anonymousLabels } from './anonymise.js';
+export { importTable, parseCsv, companyKey, cleanCompany } from './tables.js';
+export { combineSources } from './combine.js';
+export { SERIES, formatMoney } from './series.js';
+export { GMAIL_SCRIPT } from './gmail-script.js';
 export { mountStudio } from './studio.js';
